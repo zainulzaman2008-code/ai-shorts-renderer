@@ -1,0 +1,56 @@
+from flask import Flask, request, jsonify, send_file
+import os
+import requests
+import tempfile
+from moviepy.editor import VideoFileClip, AudioFileClip
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return jsonify({"status": "AI Shorts Renderer is running!"})
+
+@app.route('/render', methods=['POST'])
+def render_video():
+    try:
+        data = request.json
+        topic = data.get('topic')
+        script = data.get('script')
+        audio_url = data.get('audio_url')
+
+        # Fetch stock footage from Pexels
+        pexels_key = os.environ.get('PEXELS_API_KEY')
+        headers = {'Authorization': pexels_key}
+        pexels_response = requests.get(
+            f'https://api.pexels.com/videos/search?query={topic}&per_page=5&orientation=portrait',
+            headers=headers
+        )
+        videos = pexels_response.json()['videos']
+        video_url = videos[0]['video_files'][0]['link']
+
+        # Download video and audio
+        tmp_dir = tempfile.mkdtemp()
+        video_path = os.path.join(tmp_dir, 'footage.mp4')
+        audio_path = os.path.join(tmp_dir, 'voiceover.mp3')
+        output_path = os.path.join(tmp_dir, 'final_short.mp4')
+
+        with open(video_path, 'wb') as f:
+            f.write(requests.get(video_url).content)
+
+        with open(audio_path, 'wb') as f:
+            f.write(requests.get(audio_url).content)
+
+        # Render video
+        video_clip = VideoFileClip(video_path).resize((1080, 1920))
+        audio_clip = AudioFileClip(audio_path)
+        final = video_clip.set_audio(audio_clip).set_duration(audio_clip.duration)
+        final.write_videofile(output_path, fps=30, codec='libx264')
+
+        return send_file(output_path, mimetype='video/mp4')
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
