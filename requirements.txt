@@ -1,7 +1,7 @@
 flask
 requests
-moviepy
-imageio
+moviepy==1.0.3
+imageio==2.25.1
 imageio-ffmpeg
 numpy
 gunicorn
