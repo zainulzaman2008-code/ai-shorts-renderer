@@ -4,3 +4,5 @@ moviepy
 imageio
 imageio-ffmpeg
 numpy
+gunicorn
+Pillow
