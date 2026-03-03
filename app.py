@@ -2,9 +2,8 @@ from flask import Flask, request, jsonify, send_file
 import os
 import requests
 import tempfile
-import subprocess
-from moviepy.editor import *
-from moviepy.video.tools.subtitles import SubtitlesClip
+import base64
+from moviepy.editor import VideoFileClip, AudioFileClip
 
 app = Flask(__name__)
 
@@ -17,8 +16,7 @@ def render_video():
     try:
         data = request.json
         topic = data.get('topic')
-        script = data.get('script')
-        audio_url = data.get('audio_url')
+        audio_base64 = data.get('audio')
 
         # Fetch stock footage from Pexels
         pexels_key = os.environ.get('PEXELS_API_KEY')
@@ -30,9 +28,8 @@ def render_video():
         videos = pexels_response.json()['videos']
         video_url = videos[0]['video_files'][0]['link']
 
-        # Download video and audio
+        # Download video
         tmp_dir = tempfile.mkdtemp()
-        
         video_path = os.path.join(tmp_dir, 'footage.mp4')
         audio_path = os.path.join(tmp_dir, 'voiceover.mp3')
         output_path = os.path.join(tmp_dir, 'final_short.mp4')
@@ -40,13 +37,13 @@ def render_video():
         with open(video_path, 'wb') as f:
             f.write(requests.get(video_url).content)
 
+        # Decode base64 audio
         with open(audio_path, 'wb') as f:
-            f.write(requests.get(audio_url).content)
+            f.write(base64.b64decode(audio_base64))
 
         # Render video
         video_clip = VideoFileClip(video_path).resize((1080, 1920))
         audio_clip = AudioFileClip(audio_path)
-        
         final = video_clip.set_audio(audio_clip).set_duration(audio_clip.duration)
         final.write_videofile(output_path, fps=30, codec='libx264')
 
