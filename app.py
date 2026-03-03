@@ -3,6 +3,10 @@ import os
 import requests
 import tempfile
 import base64
+import PIL.Image
+# Fix for newer Pillow versions
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 from moviepy.editor import VideoFileClip, AudioFileClip
 
 app = Flask(__name__)
