@@ -356,6 +356,24 @@ def delete_from_cloudinary(job_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/wait/<job_id>', methods=['GET'])
+def wait_for_job(job_id):
+    timeout = 900  # 15 minutes max
+    interval = 10  # check every 10 seconds
+    elapsed = 0
+    while elapsed < timeout:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({"status": "not_found"}), 404
+        if job['status'] == 'done':
+            return jsonify(job)
+        if job['status'] == 'error':
+            return jsonify(job), 500
+        time.sleep(interval)
+        elapsed += interval
+    return jsonify({"status": "timeout"}), 408
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
