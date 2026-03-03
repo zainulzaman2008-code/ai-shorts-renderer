@@ -5,4 +5,5 @@ imageio==2.25.1
 imageio-ffmpeg
 numpy
 gunicorn
-Pillow==10.0.0
+Pillow
+decorator==4.4.2
