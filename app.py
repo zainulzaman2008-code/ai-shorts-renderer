@@ -6,6 +6,8 @@ import base64
 import threading
 import hashlib
 import time
+import subprocess
+import json
 import numpy as np
 import PIL.Image
 import PIL.ImageDraw
@@ -28,17 +30,14 @@ jobs = {}
 # ─────────────────────────────────────────────
 
 def self_ping(job_id, interval=25):
-    """Ping own server every 25 seconds to keep Railway alive until job is done."""
     own_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
     if own_url:
         own_url = f"https://{own_url}/ping"
     else:
         own_url = "http://localhost:8080/ping"
-
     while True:
         job = jobs.get(job_id, {})
-        status = job.get('status', 'processing')
-        if status in ('done', 'error'):
+        if job.get('status') in ('done', 'error'):
             break
         try:
             requests.get(own_url, timeout=10)
@@ -107,60 +106,66 @@ def upload_to_cloudinary(file_path, public_id, resource_type='video'):
         }, files={'file': f}, timeout=120)
     return resp.json()
 
-def make_text_frame(text, highlight_word, W, H, font_size=70):
-    img = PIL.Image.new('RGBA', (W, 160), (0, 0, 0, 140))
-    draw = PIL.ImageDraw.Draw(img)
-    try:
-        font = PIL.ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', font_size)
-        font_yellow = PIL.ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', font_size + 10)
-    except:
-        font = PIL.ImageFont.load_default()
-        font_yellow = font
-    words = text.split()
-    x = 20
-    y = 40
-    for word in words:
-        color = (255, 215, 0) if word == highlight_word else (255, 255, 255)
-        f = font_yellow if word == highlight_word else font
-        draw.text((x, y), word + ' ', font=f, fill=color)
-        bbox = draw.textbbox((x, y), word + ' ', font=f)
-        x += bbox[2] - bbox[0]
-    return np.array(img.convert('RGB'))
-
-def make_title_frame(W):
-    img = PIL.Image.new('RGBA', (W, 100), (0, 0, 0, 153))
-    draw = PIL.ImageDraw.Draw(img)
-    try:
-        font = PIL.ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 52)
-    except:
-        font = PIL.ImageFont.load_default()
-    draw.text((W//2, 50), 'TECH FACTS', font=font, fill=(255, 215, 0), anchor='mm')
-    return np.array(img.convert('RGB'))
-
-def build_caption_clips(script, audio_duration, video_size):
-    W, H = video_size
+def build_caption_filter(script, audio_duration, W, H):
+    """Build FFmpeg drawtext filter for captions - much faster than MoviePy clips."""
     words = script.split()
     if not words:
-        return []
+        return ""
+    
     word_duration = audio_duration / len(words)
-    clips = []
     line_size = 5
     groups = [words[i:i+line_size] for i in range(0, len(words), line_size)]
+    
+    filters = []
     t = 0
+    
+    # Title bar - always visible
+    filters.append(
+        f"drawbox=x=0:y=30:w={W}:h=90:color=black@0.6:t=fill"
+    )
+    filters.append(
+        f"drawtext=text='TECH FACTS':fontsize=50:fontcolor=#FFD700:"
+        f"x=(w-text_w)/2:y=55:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    )
+    
+    # Caption bar - always visible
+    filters.append(
+        f"drawbox=x=0:y={H-230}:w={W}:h=150:color=black@0.55:t=fill"
+    )
+    
     for group in groups:
         group_duration = word_duration * len(group)
         group_start = t
         full_line = ' '.join(group)
+        
+        # White line always shown during group
+        safe_line = full_line.replace("'", "\\'").replace(":", "\\:")
+        filters.append(
+            f"drawtext=text='{safe_line}':fontsize=65:fontcolor=white:"
+            f"x=(w-text_w)/2:y={H-210}:"
+            f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+            f"enable='between(t,{group_start:.2f},{group_start+group_duration:.2f})'"
+        )
+        
+        # Yellow highlight per word
         for wi, word in enumerate(group):
             word_start = group_start + wi * word_duration
-            frame = make_text_frame(full_line, word, W, H)
-            clip = (ImageClip(frame)
-                    .set_start(word_start)
-                    .set_duration(word_duration)
-                    .set_position(('center', H - 220)))
-            clips.append(clip)
+            word_end = word_start + word_duration
+            safe_word = word.replace("'", "\\'").replace(":", "\\:")
+            # Calculate approximate x position
+            chars_before = len(' '.join(group[:wi])) + (1 if wi > 0 else 0)
+            total_chars = max(len(full_line), 1)
+            x_pos = int((chars_before / total_chars) * W * 0.75) + int(W * 0.1)
+            filters.append(
+                f"drawtext=text='{safe_word}':fontsize=75:fontcolor=#FFD700:"
+                f"x={x_pos}:y={H-218}:"
+                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+                f"enable='between(t,{word_start:.2f},{word_end:.2f})'"
+            )
+        
         t += group_duration
-    return clips
+    
+    return ','.join(filters)
 
 def build_video(job_id, topic, script, audio_base64):
     try:
@@ -173,6 +178,7 @@ def build_video(job_id, topic, script, audio_base64):
             f.write(base64.b64decode(audio_base64))
         audio_clip = AudioFileClip(audio_path)
         total_duration = audio_clip.duration
+        audio_clip.close()
 
         jobs[job_id]['progress'] = 'Fetching stock footage...'
 
@@ -182,7 +188,7 @@ def build_video(job_id, topic, script, audio_base64):
         if not video_urls:
             raise Exception("No Pexels videos found for: " + topic)
 
-        # 3. Download & cut footage
+        # 3. Download footage
         jobs[job_id]['progress'] = 'Downloading footage...'
         TARGET_W, TARGET_H = 1080, 1920
         segment_duration = 4.0
@@ -213,13 +219,14 @@ def build_video(job_id, topic, script, audio_base64):
                         segments.append(seg)
                         if len(segments) >= needed_segments:
                             break
+                vc.close()
             except Exception:
                 continue
 
         if not segments:
             raise Exception("Could not process any video segments")
 
-        # 4. Concatenate
+        # 4. Concatenate & export base video
         jobs[job_id]['progress'] = 'Compositing video...'
         full_bg = concatenate_videoclips(segments, method='compose')
         if full_bg.duration < total_duration:
@@ -227,41 +234,44 @@ def build_video(job_id, topic, script, audio_base64):
             full_bg = concatenate_videoclips([full_bg] * loops, method='compose')
         full_bg = full_bg.subclip(0, total_duration).set_fps(30)
 
-        # 5. Captions
-        jobs[job_id]['progress'] = 'Adding captions...'
-        caption_clips = build_caption_clips(script, total_duration, (TARGET_W, TARGET_H))
-
-        # 6. Title bar
-        title_frame = make_title_frame(TARGET_W)
-        title_clip = (ImageClip(title_frame)
-                      .set_duration(total_duration)
-                      .set_position(('center', 40)))
-
-        # 7. Compose
-        all_clips = [full_bg, title_clip] + caption_clips
-        final = CompositeVideoClip(all_clips, size=(TARGET_W, TARGET_H))
-        final = final.set_audio(audio_clip).set_duration(total_duration)
-
-        # 8. Export
-        jobs[job_id]['progress'] = 'Rendering final video...'
-        output_path = os.path.join(tmp, 'final_short.mp4')
-        final.write_videofile(
-            output_path,
+        base_path = os.path.join(tmp, 'base.mp4')
+        full_bg.write_videofile(
+            base_path,
             fps=30,
             codec='libx264',
-            audio_codec='aac',
+            audio=False,
             preset='ultrafast',
             threads=4,
             logger=None
         )
+        full_bg.close()
 
-        # 9. Upload video to Cloudinary
+        # 5. Add captions + audio using FFmpeg directly (FAST!)
+        jobs[job_id]['progress'] = 'Adding captions and audio...'
+        output_path = os.path.join(tmp, 'final_short.mp4')
+        caption_filter = build_caption_filter(script, total_duration, TARGET_W, TARGET_H)
+
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', base_path,
+            '-i', audio_path,
+            '-vf', caption_filter,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-c:a', 'aac',
+            '-shortest',
+            '-threads', '4',
+            output_path
+        ]
+        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+
+        # 6. Upload video to Cloudinary
         jobs[job_id]['progress'] = 'Uploading to Cloudinary...'
         public_id = f"shorts/{job_id}"
         result = upload_to_cloudinary(output_path, public_id, 'video')
         video_url = result.get('secure_url')
 
-        # 10. Upload thumbnail
+        # 7. Upload thumbnail
         thumb_url = fetch_pexels_thumbnail(topic, pexels_key)
         cloudinary_thumb_url = None
         if thumb_url:
@@ -301,7 +311,6 @@ def render_video():
     audio_base64 = data.get('audio', '')
     if not audio_base64:
         return jsonify({"error": "No audio provided"}), 400
-
     job_id = os.urandom(8).hex()
 
     # Start render thread
@@ -309,7 +318,7 @@ def render_video():
     render_thread.daemon = True
     render_thread.start()
 
-    # Start self-ping thread to keep Railway alive
+    # Start self-ping thread
     ping_thread = threading.Thread(target=self_ping, args=(job_id,))
     ping_thread.daemon = True
     ping_thread.start()
