@@ -8,8 +8,15 @@ import hashlib
 import time
 import PIL.Image
 
+# Fix for newer Pillow versions
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+
+# Fix ImageMagick path for Railway
+os.environ['IMAGEMAGICK_BINARY'] = '/usr/bin/convert'
+
+from moviepy.config import change_settings
+change_settings({"IMAGEMAGICK_BINARY": "/usr/bin/convert"})
 
 from moviepy.editor import (
     VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip,
@@ -26,7 +33,7 @@ def download_file(url, path):
         for chunk in r.iter_content(8192):
             f.write(chunk)
 
-def fetch_pexels_videos(topic, api_key, count=8):
+def fetch_pexels_videos(topic, api_key, count=5):
     headers = {'Authorization': api_key}
     urls = []
     for query in [topic, 'technology future', 'space science']:
@@ -145,7 +152,7 @@ def build_video(job_id, topic, script, audio_base64):
 
         # 2. Fetch Pexels footage
         pexels_key = os.environ.get('PEXELS_API_KEY', '')
-        video_urls = fetch_pexels_videos(topic, pexels_key, count=8)
+        video_urls = fetch_pexels_videos(topic, pexels_key, count=5)
         if not video_urls:
             raise Exception("No Pexels videos found for: " + topic)
 
