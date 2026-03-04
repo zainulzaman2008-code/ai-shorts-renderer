@@ -23,6 +23,33 @@ from moviepy.video.fx.all import crop
 app = Flask(__name__)
 jobs = {}
 
+# ─────────────────────────────────────────────
+# SELF-PING SYSTEM
+# ─────────────────────────────────────────────
+
+def self_ping(job_id, interval=25):
+    """Ping own server every 25 seconds to keep Railway alive until job is done."""
+    own_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+    if own_url:
+        own_url = f"https://{own_url}/ping"
+    else:
+        own_url = "http://localhost:8080/ping"
+
+    while True:
+        job = jobs.get(job_id, {})
+        status = job.get('status', 'processing')
+        if status in ('done', 'error'):
+            break
+        try:
+            requests.get(own_url, timeout=10)
+        except:
+            pass
+        time.sleep(interval)
+
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
 def download_file(url, path):
     r = requests.get(url, stream=True, timeout=60)
     with open(path, 'wb') as f:
@@ -89,7 +116,6 @@ def make_text_frame(text, highlight_word, W, H, font_size=70):
     except:
         font = PIL.ImageFont.load_default()
         font_yellow = font
-
     words = text.split()
     x = 20
     y = 40
@@ -99,7 +125,6 @@ def make_text_frame(text, highlight_word, W, H, font_size=70):
         draw.text((x, y), word + ' ', font=f, fill=color)
         bbox = draw.textbbox((x, y), word + ' ', font=f)
         x += bbox[2] - bbox[0]
-
     return np.array(img.convert('RGB'))
 
 def make_title_frame(W):
@@ -117,18 +142,15 @@ def build_caption_clips(script, audio_duration, video_size):
     words = script.split()
     if not words:
         return []
-
     word_duration = audio_duration / len(words)
     clips = []
     line_size = 5
     groups = [words[i:i+line_size] for i in range(0, len(words), line_size)]
-
     t = 0
     for group in groups:
         group_duration = word_duration * len(group)
         group_start = t
         full_line = ' '.join(group)
-
         for wi, word in enumerate(group):
             word_start = group_start + wi * word_duration
             frame = make_text_frame(full_line, word, W, H)
@@ -137,9 +159,7 @@ def build_caption_clips(script, audio_duration, video_size):
                     .set_duration(word_duration)
                     .set_position(('center', H - 220)))
             clips.append(clip)
-
         t += group_duration
-
     return clips
 
 def build_video(job_id, topic, script, audio_base64):
@@ -261,9 +281,17 @@ def build_video(job_id, topic, script, audio_base64):
         jobs[job_id] = {"status": "error", "error": str(e)}
 
 
+# ─────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────
+
 @app.route('/')
 def home():
     return jsonify({"status": "AI Shorts Renderer is running!"})
+
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "alive"})
 
 @app.route('/render', methods=['POST'])
 def render_video():
@@ -273,10 +301,19 @@ def render_video():
     audio_base64 = data.get('audio', '')
     if not audio_base64:
         return jsonify({"error": "No audio provided"}), 400
+
     job_id = os.urandom(8).hex()
-    thread = threading.Thread(target=build_video, args=(job_id, topic, script, audio_base64))
-    thread.daemon = True
-    thread.start()
+
+    # Start render thread
+    render_thread = threading.Thread(target=build_video, args=(job_id, topic, script, audio_base64))
+    render_thread.daemon = True
+    render_thread.start()
+
+    # Start self-ping thread to keep Railway alive
+    ping_thread = threading.Thread(target=self_ping, args=(job_id,))
+    ping_thread.daemon = True
+    ping_thread.start()
+
     return jsonify({"job_id": job_id})
 
 @app.route('/status/<job_id>', methods=['GET'])
