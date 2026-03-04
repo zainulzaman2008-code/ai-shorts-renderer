@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file
 import os
+import subprocess
 import requests
 import tempfile
 import base64
@@ -12,11 +13,18 @@ import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-# Fix ImageMagick path for Railway
-os.environ['IMAGEMAGICK_BINARY'] = '/usr/bin/convert'
+# Fix ImageMagick path for Railway - find it dynamically
+try:
+    magick_path = subprocess.check_output(['which', 'convert']).decode().strip()
+    if not magick_path:
+        magick_path = subprocess.check_output(['which', 'magick']).decode().strip()
+except:
+    magick_path = '/usr/bin/convert'
+
+os.environ['IMAGEMAGICK_BINARY'] = magick_path
 
 from moviepy.config import change_settings
-change_settings({"IMAGEMAGICK_BINARY": "/usr/bin/convert"})
+change_settings({"IMAGEMAGICK_BINARY": magick_path})
 
 from moviepy.editor import (
     VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip,
