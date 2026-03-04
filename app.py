@@ -1,31 +1,22 @@
 from flask import Flask, request, jsonify, send_file
 import os
-import subprocess
 import requests
 import tempfile
 import base64
 import threading
 import hashlib
 import time
+import numpy as np
 import PIL.Image
+import PIL.ImageDraw
+import PIL.ImageFont
 
-# Fix for newer Pillow versions
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-# Fix ImageMagick path for Railway - find it dynamically
-try:
-    magick_path = subprocess.check_output(['which', 'convert']).decode().strip()
-    if not magick_path:
-        magick_path = subprocess.check_output(['which', 'magick']).decode().strip()
-except:
-    magick_path = '/usr/bin/convert'
-
-os.environ['IMAGEMAGICK_BINARY'] = magick_path
-
 from moviepy.editor import (
-    VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip,
-    concatenate_videoclips, ColorClip
+    VideoFileClip, AudioFileClip, CompositeVideoClip,
+    concatenate_videoclips, ImageClip
 )
 from moviepy.video.fx.all import crop
 
@@ -89,56 +80,66 @@ def upload_to_cloudinary(file_path, public_id, resource_type='video'):
         }, files={'file': f}, timeout=120)
     return resp.json()
 
+def make_text_frame(text, highlight_word, W, H, font_size=70):
+    img = PIL.Image.new('RGBA', (W, 160), (0, 0, 0, 140))
+    draw = PIL.ImageDraw.Draw(img)
+    try:
+        font = PIL.ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', font_size)
+        font_yellow = PIL.ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', font_size + 10)
+    except:
+        font = PIL.ImageFont.load_default()
+        font_yellow = font
+
+    words = text.split()
+    x = 20
+    y = 40
+    for word in words:
+        color = (255, 215, 0) if word == highlight_word else (255, 255, 255)
+        f = font_yellow if word == highlight_word else font
+        draw.text((x, y), word + ' ', font=f, fill=color)
+        bbox = draw.textbbox((x, y), word + ' ', font=f)
+        x += bbox[2] - bbox[0]
+
+    return np.array(img.convert('RGB'))
+
+def make_title_frame(W):
+    img = PIL.Image.new('RGBA', (W, 100), (0, 0, 0, 153))
+    draw = PIL.ImageDraw.Draw(img)
+    try:
+        font = PIL.ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 52)
+    except:
+        font = PIL.ImageFont.load_default()
+    draw.text((W//2, 50), 'TECH FACTS', font=font, fill=(255, 215, 0), anchor='mm')
+    return np.array(img.convert('RGB'))
+
 def build_caption_clips(script, audio_duration, video_size):
     W, H = video_size
     words = script.split()
     if not words:
         return []
+
     word_duration = audio_duration / len(words)
     clips = []
     line_size = 5
     groups = [words[i:i+line_size] for i in range(0, len(words), line_size)]
+
     t = 0
     for group in groups:
         group_duration = word_duration * len(group)
         group_start = t
+        full_line = ' '.join(group)
+
         for wi, word in enumerate(group):
             word_start = group_start + wi * word_duration
-            bg = (ColorClip(size=(W, 160), color=(0, 0, 0))
-                  .set_opacity(0.55)
-                  .set_start(word_start)
-                  .set_duration(word_duration)
-                  .set_position(('center', H - 220)))
-            full_line = ' '.join(group)
-            txt_white = (TextClip(
-                full_line,
-                fontsize=72,
-                color='white',
-                font='DejaVu-Sans-Bold',
-                stroke_color='black',
-                stroke_width=3,
-                method='label'
-            )
-            .set_start(word_start)
-            .set_duration(word_duration)
-            .set_position(('center', H - 210)))
-            txt_yellow = (TextClip(
-                word,
-                fontsize=82,
-                color='#FFD700',
-                font='DejaVu-Sans-Bold',
-                stroke_color='black',
-                stroke_width=3,
-                method='label'
-            )
-            .set_start(word_start)
-            .set_duration(word_duration))
-            chars_before = len(' '.join(group[:wi])) + (1 if wi > 0 else 0)
-            total_chars = len(full_line)
-            x_offset = int((chars_before / max(total_chars, 1)) * W * 0.8) + int(W * 0.1)
-            txt_yellow = txt_yellow.set_position((x_offset, H - 218))
-            clips.extend([bg, txt_white, txt_yellow])
+            frame = make_text_frame(full_line, word, W, H)
+            clip = (ImageClip(frame)
+                    .set_start(word_start)
+                    .set_duration(word_duration)
+                    .set_position(('center', H - 220)))
+            clips.append(clip)
+
         t += group_duration
+
     return clips
 
 def build_video(job_id, topic, script, audio_base64):
@@ -211,20 +212,13 @@ def build_video(job_id, topic, script, audio_base64):
         caption_clips = build_caption_clips(script, total_duration, (TARGET_W, TARGET_H))
 
         # 6. Title bar
-        title_bar = (ColorClip(size=(TARGET_W, 100), color=(0, 0, 0))
-                     .set_opacity(0.6)
-                     .set_duration(total_duration)
-                     .set_position(('center', 40)))
-        title_text = (TextClip(
-            'TECH FACTS',
-            fontsize=52,
-            color='#FFD700',
-            font='DejaVu-Sans-Bold',
-            method='label'
-        ).set_duration(total_duration).set_position(('center', 48)))
+        title_frame = make_title_frame(TARGET_W)
+        title_clip = (ImageClip(title_frame)
+                      .set_duration(total_duration)
+                      .set_position(('center', 40)))
 
         # 7. Compose
-        all_clips = [full_bg, title_bar, title_text] + caption_clips
+        all_clips = [full_bg, title_clip] + caption_clips
         final = CompositeVideoClip(all_clips, size=(TARGET_W, TARGET_H))
         final = final.set_audio(audio_clip).set_duration(total_duration)
 
