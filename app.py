@@ -23,9 +23,6 @@ except:
 
 os.environ['IMAGEMAGICK_BINARY'] = magick_path
 
-from moviepy.config import change_settings
-change_settings({"IMAGEMAGICK_BINARY": magick_path})
-
 from moviepy.editor import (
     VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip,
     concatenate_videoclips, ColorClip
