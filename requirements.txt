@@ -8,3 +8,4 @@ gunicorn
 Pillow
 decorator==4.4.2
 opencv-python-headless
+gevent
