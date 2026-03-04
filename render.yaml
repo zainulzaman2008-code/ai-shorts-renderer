@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: ai-shorts-renderer
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
-    envVars:
-      - key: PEXELS_API_KEY
-        sync: false
