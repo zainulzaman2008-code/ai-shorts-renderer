@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "fonts-dejavu"]
+nixPkgs = ["ffmpeg-full", "dejavu_fonts"]
