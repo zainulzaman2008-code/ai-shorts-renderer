@@ -8,24 +8,11 @@ import hashlib
 import time
 import json
 import subprocess
-import numpy as np
-import PIL.Image
-import PIL.ImageDraw
-import PIL.ImageFont
-
-if not hasattr(PIL.Image, 'ANTIALIAS'):
-    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
-
-from moviepy.editor import (
-    VideoFileClip, AudioFileClip, CompositeVideoClip,
-    concatenate_videoclips, ImageClip
-)
-from moviepy.video.fx.all import crop
 
 app = Flask(__name__)
 
 # ─────────────────────────────────────────────
-# FILE-BASED JOB STORE (works across threads)
+# FILE-BASED JOB STORE
 # ─────────────────────────────────────────────
 
 JOBS_DIR = '/tmp/jobs'
@@ -128,43 +115,36 @@ def build_caption_filter(script, audio_duration, W, H):
     words = script.split()
     if not words:
         return ""
-    word_duration = audio_duration / len(words)
-    line_size = 5
+    line_size = 8
     groups = [words[i:i+line_size] for i in range(0, len(words), line_size)]
+    word_duration = audio_duration / len(words)
     filters = []
+
+    # Title bar
     filters.append(f"drawbox=x=0:y=30:w={W}:h=90:color=black@0.6:t=fill")
     filters.append(
         f"drawtext=text='TECH FACTS':fontsize=50:fontcolor=#FFD700:"
         f"x=(w-text_w)/2:y=55:"
         f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     )
+
+    # Caption bar
     filters.append(f"drawbox=x=0:y={H-230}:w={W}:h=150:color=black@0.55:t=fill")
+
+    # One caption line per group (fast)
     t = 0
     for group in groups:
         group_duration = word_duration * len(group)
-        group_start = t
         full_line = ' '.join(group)
         safe_line = full_line.replace("'", "\\'").replace(":", "\\:").replace("%", "\\%")
         filters.append(
-            f"drawtext=text='{safe_line}':fontsize=65:fontcolor=white:"
-            f"x=(w-text_w)/2:y={H-210}:"
+            f"drawtext=text='{safe_line}':fontsize=60:fontcolor=white:"
+            f"x=(w-text_w)/2:y={H-200}:"
             f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-            f"enable='between(t,{group_start:.2f},{group_start+group_duration:.2f})'"
+            f"enable='between(t,{t:.2f},{t+group_duration:.2f})'"
         )
-        for wi, word in enumerate(group):
-            word_start = group_start + wi * word_duration
-            word_end = word_start + word_duration
-            safe_word = word.replace("'", "\\'").replace(":", "\\:").replace("%", "\\%")
-            chars_before = len(' '.join(group[:wi])) + (1 if wi > 0 else 0)
-            total_chars = max(len(full_line), 1)
-            x_pos = int((chars_before / total_chars) * W * 0.75) + int(W * 0.1)
-            filters.append(
-                f"drawtext=text='{safe_word}':fontsize=75:fontcolor=#FFD700:"
-                f"x={x_pos}:y={H-218}:"
-                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-                f"enable='between(t,{word_start:.2f},{word_end:.2f})'"
-            )
         t += group_duration
+
     return ','.join(filters)
 
 def build_video(job_id, topic, script, audio_base64):
@@ -176,9 +156,14 @@ def build_video(job_id, topic, script, audio_base64):
         audio_path = os.path.join(tmp, 'voice.mp3')
         with open(audio_path, 'wb') as f:
             f.write(base64.b64decode(audio_base64))
-        audio_clip = AudioFileClip(audio_path)
-        total_duration = audio_clip.duration
-        audio_clip.close()
+
+        # Get audio duration using ffprobe
+        result = subprocess.run([
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_format', audio_path
+        ], capture_output=True, text=True)
+        audio_info = json.loads(result.stdout)
+        total_duration = float(audio_info['format']['duration'])
 
         set_job(job_id, {"status": "processing", "progress": "Fetching stock footage..."})
 
@@ -191,78 +176,74 @@ def build_video(job_id, topic, script, audio_base64):
         # 3. Download footage
         set_job(job_id, {"status": "processing", "progress": "Downloading footage..."})
         TARGET_W, TARGET_H = 1080, 1920
-        segment_duration = 4.0
+        segment_duration = 5.0
         needed_segments = int(total_duration / segment_duration) + 2
 
-        segments = []
+        # Download and prepare video segments using FFmpeg only
+        segment_paths = []
         for i, url in enumerate(video_urls):
-            if len(segments) >= needed_segments:
+            if len(segment_paths) >= needed_segments:
                 break
             vp = os.path.join(tmp, f'raw_{i}.mp4')
+            seg_path = os.path.join(tmp, f'seg_{i}.mp4')
             try:
                 download_file(url, vp)
-                vc = VideoFileClip(vp)
-                clip_ratio = vc.w / vc.h
-                target_ratio = TARGET_W / TARGET_H
-                if clip_ratio > target_ratio:
-                    vc = vc.resize(height=TARGET_H)
-                else:
-                    vc = vc.resize(width=TARGET_W)
-                x_c = vc.w / 2
-                y_c = vc.h / 2
-                vc = crop(vc, width=TARGET_W, height=TARGET_H, x_center=x_c, y_center=y_c)
-                clip_seg_count = min(2, int(vc.duration / segment_duration))
-                for s in range(clip_seg_count):
-                    start = s * segment_duration
-                    if start + segment_duration <= vc.duration:
-                        seg = vc.subclip(start, start + segment_duration)
-                        segments.append(seg)
-                        if len(segments) >= needed_segments:
-                            break
-                vc.close()
+                # Use FFmpeg to resize, crop, and cut to segment
+                subprocess.run([
+                    'ffmpeg', '-y', '-i', vp,
+                    '-vf', f'scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,'
+                           f'crop={TARGET_W}:{TARGET_H}',
+                    '-t', str(segment_duration),
+                    '-an', '-preset', 'ultrafast',
+                    '-c:v', 'libx264', seg_path
+                ], capture_output=True, check=True)
+                segment_paths.append(seg_path)
             except Exception:
                 continue
 
-        if not segments:
+        if not segment_paths:
             raise Exception("Could not process any video segments")
 
-        # 4. Concatenate
+        # 4. Concatenate segments
         set_job(job_id, {"status": "processing", "progress": "Compositing video..."})
-        full_bg = concatenate_videoclips(segments, method='compose')
-        if full_bg.duration < total_duration:
-            loops = int(total_duration / full_bg.duration) + 1
-            full_bg = concatenate_videoclips([full_bg] * loops, method='compose')
-        full_bg = full_bg.subclip(0, total_duration).set_fps(30)
+
+        # Loop segments to match audio duration
+        concat_list = []
+        total_seg_duration = len(segment_paths) * segment_duration
+        loops = int(total_duration / total_seg_duration) + 2
+        for _ in range(loops):
+            concat_list.extend(segment_paths)
+        concat_list = concat_list[:needed_segments + 2]
+
+        list_file = os.path.join(tmp, 'list.txt')
+        with open(list_file, 'w') as f:
+            for sp in concat_list:
+                f.write(f"file '{sp}'\n")
 
         base_path = os.path.join(tmp, 'base.mp4')
-        full_bg.write_videofile(
-            base_path,
-            fps=30,
-            codec='libx264',
-            audio=False,
-            preset='ultrafast',
-            threads=4,
-            logger=None
-        )
-        full_bg.close()
+        subprocess.run([
+            'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+            '-i', list_file,
+            '-t', str(total_duration),
+            '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-an', base_path
+        ], capture_output=True, check=True)
 
         # 5. Add captions + audio using FFmpeg
         set_job(job_id, {"status": "processing", "progress": "Adding captions and audio..."})
         output_path = os.path.join(tmp, 'final_short.mp4')
         caption_filter = build_caption_filter(script, total_duration, TARGET_W, TARGET_H)
-        ffmpeg_cmd = [
+
+        subprocess.run([
             'ffmpeg', '-y',
             '-i', base_path,
             '-i', audio_path,
             '-vf', caption_filter,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-c:a', 'aac',
-            '-shortest',
+            '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-c:a', 'aac', '-shortest',
             '-threads', '4',
             output_path
-        ]
-        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+        ], capture_output=True, check=True)
 
         # 6. Upload video to Cloudinary
         set_job(job_id, {"status": "processing", "progress": "Uploading to Cloudinary..."})
@@ -374,7 +355,6 @@ def delete_from_cloudinary(job_id):
             'timestamp': timestamp,
             'signature': sig2
         })
-        # Clean up job file
         job_path = os.path.join(JOBS_DIR, f"{job_id}.json")
         if os.path.exists(job_path):
             os.remove(job_path)
