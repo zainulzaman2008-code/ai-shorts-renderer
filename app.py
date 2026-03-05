@@ -54,6 +54,15 @@ def self_ping(job_id, interval=25):
 # HELPERS
 # ─────────────────────────────────────────────
 
+def find_binary(name):
+    try:
+        return subprocess.check_output(['which', name]).decode().strip()
+    except:
+        for path in [f'/usr/bin/{name}', f'/usr/local/bin/{name}', f'/nix/var/nix/profiles/default/bin/{name}']:
+            if os.path.exists(path):
+                return path
+    return name
+
 def download_file(url, path):
     r = requests.get(url, stream=True, timeout=60)
     with open(path, 'wb') as f:
@@ -119,19 +128,13 @@ def build_caption_filter(script, audio_duration, W, H):
     groups = [words[i:i+line_size] for i in range(0, len(words), line_size)]
     word_duration = audio_duration / len(words)
     filters = []
-
-    # Title bar
     filters.append(f"drawbox=x=0:y=30:w={W}:h=90:color=black@0.6:t=fill")
     filters.append(
         f"drawtext=text='TECH FACTS':fontsize=50:fontcolor=#FFD700:"
         f"x=(w-text_w)/2:y=55:"
         f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     )
-
-    # Caption bar
     filters.append(f"drawbox=x=0:y={H-230}:w={W}:h=150:color=black@0.55:t=fill")
-
-    # One caption line per group (fast)
     t = 0
     for group in groups:
         group_duration = word_duration * len(group)
@@ -144,7 +147,6 @@ def build_caption_filter(script, audio_duration, W, H):
             f"enable='between(t,{t:.2f},{t+group_duration:.2f})'"
         )
         t += group_duration
-
     return ','.join(filters)
 
 def build_video(job_id, topic, script, audio_base64):
@@ -152,14 +154,17 @@ def build_video(job_id, topic, script, audio_base64):
         set_job(job_id, {"status": "processing", "progress": "Starting..."})
         tmp = tempfile.mkdtemp()
 
+        FFMPEG = find_binary('ffmpeg')
+        FFPROBE = find_binary('ffprobe')
+
         # 1. Save audio
         audio_path = os.path.join(tmp, 'voice.mp3')
         with open(audio_path, 'wb') as f:
             f.write(base64.b64decode(audio_base64))
 
-        # Get audio duration using ffprobe
+        # Get audio duration
         result = subprocess.run([
-            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            FFPROBE, '-v', 'quiet', '-print_format', 'json',
             '-show_format', audio_path
         ], capture_output=True, text=True)
         audio_info = json.loads(result.stdout)
@@ -179,7 +184,6 @@ def build_video(job_id, topic, script, audio_base64):
         segment_duration = 5.0
         needed_segments = int(total_duration / segment_duration) + 2
 
-        # Download and prepare video segments using FFmpeg only
         segment_paths = []
         for i, url in enumerate(video_urls):
             if len(segment_paths) >= needed_segments:
@@ -188,9 +192,8 @@ def build_video(job_id, topic, script, audio_base64):
             seg_path = os.path.join(tmp, f'seg_{i}.mp4')
             try:
                 download_file(url, vp)
-                # Use FFmpeg to resize, crop, and cut to segment
                 subprocess.run([
-                    'ffmpeg', '-y', '-i', vp,
+                    FFMPEG, '-y', '-i', vp,
                     '-vf', f'scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,'
                            f'crop={TARGET_W}:{TARGET_H}',
                     '-t', str(segment_duration),
@@ -207,10 +210,9 @@ def build_video(job_id, topic, script, audio_base64):
         # 4. Concatenate segments
         set_job(job_id, {"status": "processing", "progress": "Compositing video..."})
 
-        # Loop segments to match audio duration
-        concat_list = []
         total_seg_duration = len(segment_paths) * segment_duration
         loops = int(total_duration / total_seg_duration) + 2
+        concat_list = []
         for _ in range(loops):
             concat_list.extend(segment_paths)
         concat_list = concat_list[:needed_segments + 2]
@@ -222,20 +224,20 @@ def build_video(job_id, topic, script, audio_base64):
 
         base_path = os.path.join(tmp, 'base.mp4')
         subprocess.run([
-            'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+            FFMPEG, '-y', '-f', 'concat', '-safe', '0',
             '-i', list_file,
             '-t', str(total_duration),
             '-c:v', 'libx264', '-preset', 'ultrafast',
             '-an', base_path
         ], capture_output=True, check=True)
 
-        # 5. Add captions + audio using FFmpeg
+        # 5. Add captions + audio
         set_job(job_id, {"status": "processing", "progress": "Adding captions and audio..."})
         output_path = os.path.join(tmp, 'final_short.mp4')
         caption_filter = build_caption_filter(script, total_duration, TARGET_W, TARGET_H)
 
         subprocess.run([
-            'ffmpeg', '-y',
+            FFMPEG, '-y',
             '-i', base_path,
             '-i', audio_path,
             '-vf', caption_filter,
@@ -281,7 +283,13 @@ def home():
 
 @app.route('/ping')
 def ping():
-    return jsonify({"status": "alive"})
+    try:
+        ffprobe_path = subprocess.check_output(['which', 'ffprobe']).decode().strip()
+        ffmpeg_path = subprocess.check_output(['which', 'ffmpeg']).decode().strip()
+    except:
+        ffprobe_path = 'not found'
+        ffmpeg_path = 'not found'
+    return jsonify({"status": "alive", "ffprobe": ffprobe_path, "ffmpeg": ffmpeg_path})
 
 @app.route('/render', methods=['POST'])
 def render_video():
