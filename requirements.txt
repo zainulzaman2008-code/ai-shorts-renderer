@@ -1,11 +1,4 @@
 flask
 requests
-moviepy==1.0.3
-imageio==2.25.1
-imageio-ffmpeg
-numpy
 gunicorn
-Pillow
-decorator==4.4.2
-opencv-python-headless
 gevent
