@@ -58,7 +58,7 @@ def find_binary(name):
     try:
         return subprocess.check_output(['which', name]).decode().strip()
     except:
-        for path in [f'/usr/bin/{name}', f'/usr/local/bin/{name}', f'/nix/var/nix/profiles/default/bin/{name}']:
+        for path in [f'/usr/bin/{name}', f'/usr/local/bin/{name}']:
             if os.path.exists(path):
                 return path
     return name
@@ -69,7 +69,7 @@ def download_file(url, path):
         for chunk in r.iter_content(8192):
             f.write(chunk)
 
-def fetch_pexels_videos(topic, api_key, count=5):
+def fetch_pexels_videos(topic, api_key, count=3):
     headers = {'Authorization': api_key}
     urls = []
     for query in [topic, 'technology future', 'space science']:
@@ -174,14 +174,14 @@ def build_video(job_id, topic, script, audio_base64):
 
         # 2. Fetch Pexels footage
         pexels_key = os.environ.get('PEXELS_API_KEY', '')
-        video_urls = fetch_pexels_videos(topic, pexels_key, count=5)
+        video_urls = fetch_pexels_videos(topic, pexels_key, count=3)
         if not video_urls:
             raise Exception("No Pexels videos found for: " + topic)
 
         # 3. Download footage
         set_job(job_id, {"status": "processing", "progress": "Downloading footage..."})
         TARGET_W, TARGET_H = 1080, 1920
-        segment_duration = 5.0
+        segment_duration = 4.0
         needed_segments = int(total_duration / segment_duration) + 2
 
         segment_paths = []
@@ -198,6 +198,7 @@ def build_video(job_id, topic, script, audio_base64):
                            f'crop={TARGET_W}:{TARGET_H}',
                     '-t', str(segment_duration),
                     '-an', '-preset', 'ultrafast',
+                    '-threads', '1',
                     '-c:v', 'libx264', seg_path
                 ], capture_output=True, check=True)
                 segment_paths.append(seg_path)
@@ -228,6 +229,9 @@ def build_video(job_id, topic, script, audio_base64):
             '-i', list_file,
             '-t', str(total_duration),
             '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-threads', '1',
+            '-bufsize', '512k',
+            '-maxrate', '1M',
             '-an', base_path
         ], capture_output=True, check=True)
 
@@ -242,8 +246,10 @@ def build_video(job_id, topic, script, audio_base64):
             '-i', audio_path,
             '-vf', caption_filter,
             '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-threads', '1',
+            '-bufsize', '512k',
+            '-maxrate', '1M',
             '-c:a', 'aac', '-shortest',
-            '-threads', '4',
             output_path
         ], capture_output=True, check=True)
 
