@@ -52,35 +52,30 @@ def self_ping(job_id, interval=25):
         time.sleep(interval)
 
 # ─────────────────────────────────────────────
-# KEYWORD EXTRACTOR FROM SCRIPT
+# KEYWORD EXTRACTOR
 # ─────────────────────────────────────────────
 
 def extract_keywords(topic, script):
-    """Extract best visual keywords from topic and script."""
-    # Use topic words as primary keywords
     stop_words = {'the','a','an','is','are','was','were','in','on','at','to','for',
                   'of','and','or','but','with','this','that','it','be','have','has',
                   'will','can','do','did','not','from','by','as','we','our','your'}
-    
     words = (topic + ' ' + script).lower().split()
     keywords = []
     for word in words:
         word = word.strip('.,!?')
         if len(word) > 4 and word not in stop_words and word not in keywords:
             keywords.append(word)
-        if len(keywords) >= 8:
+        if len(keywords) >= 10:
             break
-    
-    # Always include topic as first keyword
     topic_clean = topic.strip().split()[:3]
-    final_keywords = topic_clean + keywords[:5]
+    final_keywords = topic_clean + keywords[:7]
     return final_keywords
 
 # ─────────────────────────────────────────────
 # MULTI-SOURCE VIDEO FETCHER
 # ─────────────────────────────────────────────
 
-def fetch_pexels_videos(keywords, api_key, count=4):
+def fetch_pexels_videos(keywords, api_key, count=6):
     headers = {'Authorization': api_key}
     urls = []
     for keyword in keywords:
@@ -104,7 +99,7 @@ def fetch_pexels_videos(keywords, api_key, count=4):
             continue
     return urls[:count]
 
-def fetch_pixabay_videos(keywords, api_key, count=4):
+def fetch_pixabay_videos(keywords, api_key, count=6):
     urls = []
     for keyword in keywords:
         if len(urls) >= count:
@@ -122,7 +117,6 @@ def fetch_pixabay_videos(keywords, api_key, count=4):
                 timeout=15
             )
             for v in resp.json().get('hits', []):
-                # Get medium quality video
                 video_url = v.get('videos', {}).get('medium', {}).get('url')
                 if video_url:
                     urls.append(video_url)
@@ -181,7 +175,7 @@ def fetch_pexels_thumbnail(keyword, api_key):
     return None
 
 # ─────────────────────────────────────────────
-# CLOUDINARY UPLOAD
+# CLOUDINARY
 # ─────────────────────────────────────────────
 
 def upload_to_cloudinary(file_path, public_id, resource_type='video'):
@@ -220,7 +214,7 @@ def download_file(url, path):
         for chunk in r.iter_content(8192):
             f.write(chunk)
 
-def build_title_filter(W, H, duration):
+def build_title_filter(W, H):
     return (
         f"drawbox=x=0:y=30:w={W}:h=90:color=black@0.6:t=fill,"
         f"drawtext=text='TECH FACTS':fontsize=50:fontcolor=#FFD700:"
@@ -252,9 +246,12 @@ def build_video(job_id, topic, script, audio_base64):
         audio_info = json.loads(result.stdout)
         total_duration = float(audio_info['format']['duration'])
 
+        # Ensure video is at least 50 seconds
+        total_duration = max(total_duration, 50.0)
+
         set_job(job_id, {"status": "processing", "progress": "Extracting keywords..."})
 
-        # 2. Extract keywords from script
+        # 2. Extract keywords
         keywords = extract_keywords(topic, script)
 
         set_job(job_id, {"status": "processing", "progress": "Fetching footage from multiple sources..."})
@@ -265,22 +262,18 @@ def build_video(job_id, topic, script, audio_base64):
 
         video_urls = []
 
-        # Pexels - primary source
-        pexels_urls = fetch_pexels_videos(keywords, pexels_key, count=3)
+        pexels_urls = fetch_pexels_videos(keywords, pexels_key, count=6)
         video_urls.extend(pexels_urls)
 
-        # Pixabay - secondary source
         if pixabay_key:
-            pixabay_urls = fetch_pixabay_videos(keywords, pixabay_key, count=3)
+            pixabay_urls = fetch_pixabay_videos(keywords, pixabay_key, count=6)
             video_urls.extend(pixabay_urls)
 
-        # NASA - for space/science topics
         space_keywords = ['space', 'nasa', 'galaxy', 'planet', 'star', 'universe', 'rocket', 'asteroid']
         if any(k.lower() in space_keywords for k in keywords):
             nasa_urls = fetch_nasa_videos(keywords, count=2)
             video_urls.extend(nasa_urls)
 
-        # Shuffle for variety
         random.shuffle(video_urls)
 
         if not video_urls:
@@ -290,7 +283,7 @@ def build_video(job_id, topic, script, audio_base64):
         set_job(job_id, {"status": "processing", "progress": "Downloading footage..."})
         TARGET_W, TARGET_H = 720, 1280
         segment_duration = 4.0
-        needed_segments = int(total_duration / segment_duration) + 2
+        needed_segments = int(total_duration / segment_duration) + 3
 
         segment_paths = []
         for i, url in enumerate(video_urls):
@@ -324,7 +317,7 @@ def build_video(job_id, topic, script, audio_base64):
         concat_list = []
         for _ in range(loops):
             concat_list.extend(segment_paths)
-        concat_list = concat_list[:needed_segments + 2]
+        concat_list = concat_list[:needed_segments + 3]
 
         list_file = os.path.join(tmp, 'list.txt')
         with open(list_file, 'w') as f:
@@ -343,10 +336,10 @@ def build_video(job_id, topic, script, audio_base64):
             '-an', base_path
         ], capture_output=True, check=True)
 
-        # 6. Add title bar + audio only (no captions = faster)
+        # 6. Add title bar + audio
         set_job(job_id, {"status": "processing", "progress": "Adding title and audio..."})
         output_path = os.path.join(tmp, 'final_short.mp4')
-        title_filter = build_title_filter(TARGET_W, TARGET_H, total_duration)
+        title_filter = build_title_filter(TARGET_W, TARGET_H)
 
         subprocess.run([
             FFMPEG, '-y',
