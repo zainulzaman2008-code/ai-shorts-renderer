@@ -288,7 +288,7 @@ def build_video(job_id, topic, script, audio_base64):
 
         # 4. Download & process footage
         set_job(job_id, {"status": "processing", "progress": "Downloading footage..."})
-        TARGET_W, TARGET_H = 1080, 1920
+        TARGET_W, TARGET_H = 720, 1280
         segment_duration = 4.0
         needed_segments = int(total_duration / segment_duration) + 2
 
